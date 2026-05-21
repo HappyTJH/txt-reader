@@ -21,6 +21,11 @@ interface SavedBook extends BookMeta {
   updatedAt: number;
 }
 
+interface LibraryBook extends BookMeta {
+  detectedEncoding?: DisplayEncoding;
+  updatedAt: number;
+}
+
 interface SavedProgress {
   pageIndex: number;
   progress: number;
@@ -45,6 +50,7 @@ const DB_NAME = 'txt-reader-library';
 const DB_VERSION = 1;
 const BOOK_STORE = 'books';
 const LAST_BOOK_KEY = 'txt-reader-last-book-id';
+const LIBRARY_KEY = 'txt-reader-library-index-v1';
 const SETTINGS_KEY = 'txt-reader-settings-v3';
 const PROGRESS_PREFIX = 'txt-reader-progress-v1';
 
@@ -86,6 +92,24 @@ const readFromStore = async <T,>(id: string) => {
     const request = transaction.objectStore(BOOK_STORE).get(id);
 
     request.onsuccess = () => resolve((request.result as T | undefined) ?? null);
+    request.onerror = () => reject(request.error);
+    transaction.oncomplete = () => db.close();
+  });
+};
+
+const listBooksFromStore = async () => {
+  const db = await openLibrary();
+
+  return new Promise<LibraryBook[]>((resolve, reject) => {
+    const transaction = db.transaction(BOOK_STORE, 'readonly');
+    const request = transaction.objectStore(BOOK_STORE).getAll();
+
+    request.onsuccess = () => {
+      const books = ((request.result as SavedBook[] | undefined) ?? [])
+        .map(({content: _content, pageIndex: _pageIndex, progress: _progress, ...book}) => book)
+        .sort((left, right) => right.updatedAt - left.updatedAt);
+      resolve(books);
+    };
     request.onerror = () => reject(request.error);
     transaction.oncomplete = () => db.close();
   });
@@ -171,6 +195,32 @@ const isFormTarget = (target: EventTarget | null) =>
   target instanceof HTMLSelectElement ||
   target instanceof HTMLTextAreaElement ||
   target instanceof HTMLButtonElement;
+
+const sortLibrary = (books: LibraryBook[]) => [...books].sort((left, right) => right.updatedAt - left.updatedAt);
+
+const readLibraryIndex = () => {
+  const rawLibrary = localStorage.getItem(LIBRARY_KEY);
+  if (!rawLibrary) return [];
+
+  try {
+    return sortLibrary(JSON.parse(rawLibrary) as LibraryBook[]);
+  } catch {
+    localStorage.removeItem(LIBRARY_KEY);
+    return [];
+  }
+};
+
+const writeLibraryIndex = (books: LibraryBook[]) => {
+  localStorage.setItem(LIBRARY_KEY, JSON.stringify(sortLibrary(books)));
+};
+
+const toLibraryBook = ({content: _content, pageIndex: _pageIndex, progress: _progress, ...book}: SavedBook) => book;
+
+const upsertLibraryBook = (books: LibraryBook[], nextBook: LibraryBook) => {
+  const nextBooks = sortLibrary([nextBook, ...books.filter((book) => book.id !== nextBook.id)]);
+  writeLibraryIndex(nextBooks);
+  return nextBooks;
+};
 
 const getProgressKey = (bookId: string) => `${PROGRESS_PREFIX}:${bookId}`;
 
@@ -265,6 +315,7 @@ const paginateTextRanges = (text: string, viewport: ViewportSize, settings: Read
 export default function App() {
   const [content, setContent] = useState('');
   const [bookMeta, setBookMeta] = useState<BookMeta | null>(null);
+  const [library, setLibrary] = useState<LibraryBook[]>([]);
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_SETTINGS);
   const [paginationSettings, setPaginationSettings] = useState<ReaderSettings>(DEFAULT_SETTINGS);
   const [encodingMode, setEncodingMode] = useState<EncodingMode>('auto');
@@ -300,6 +351,40 @@ export default function App() {
   const pageLabel = content ? `${visiblePageIndex + 1} / ${pageCount}` : '0 / 0';
   const readingLabel = readingMode === 'paged' ? pageLabel : '滚动模式';
 
+  const refreshLibrary = useCallback(async () => {
+    try {
+      const indexedBooks = readLibraryIndex();
+      if (indexedBooks.length > 0) {
+        setLibrary(indexedBooks);
+        return;
+      }
+
+      const storedBooks = await listBooksFromStore();
+      writeLibraryIndex(storedBooks);
+      setLibrary(storedBooks);
+    } catch {
+      setStatus('书架读取失败，请刷新后重试');
+    }
+  }, []);
+
+  const activateBook = useCallback((savedBook: SavedBook) => {
+    const savedProgress = readSavedProgress(savedBook.id);
+    currentBookRef.current = savedBook;
+    currentFileRef.current = null;
+    localStorage.setItem(LAST_BOOK_KEY, savedBook.id);
+    setBookMeta({
+      id: savedBook.id,
+      name: savedBook.name,
+      size: savedBook.size,
+      lastModified: savedBook.lastModified,
+    });
+    setContent(savedBook.content);
+    setDetectedEncoding(savedBook.detectedEncoding ?? null);
+    setPageIndex(savedProgress?.pageIndex ?? savedBook.pageIndex ?? 0);
+    setStatus(`已切换：${savedBook.name}`);
+    window.scrollTo({top: 0});
+  }, []);
+
   useEffect(() => {
     const savedSettings = localStorage.getItem(SETTINGS_KEY);
     if (!savedSettings) return;
@@ -326,6 +411,10 @@ export default function App() {
   }, [settings]);
 
   useEffect(() => {
+    refreshLibrary();
+  }, [refreshLibrary]);
+
+  useEffect(() => {
     let cancelled = false;
 
     const restoreLastBook = async () => {
@@ -336,17 +425,7 @@ export default function App() {
         const savedBook = await readFromStore<SavedBook>(lastBookId);
         if (!savedBook || cancelled) return;
 
-        currentBookRef.current = savedBook;
-        setBookMeta({
-          id: savedBook.id,
-          name: savedBook.name,
-          size: savedBook.size,
-          lastModified: savedBook.lastModified,
-        });
-        const savedProgress = readSavedProgress(savedBook.id);
-        setContent(savedBook.content);
-        setDetectedEncoding(savedBook.detectedEncoding ?? null);
-        setPageIndex(savedProgress?.pageIndex ?? savedBook.pageIndex ?? 0);
+        activateBook(savedBook);
         setStatus(`已恢复：${savedBook.name}`);
       } catch {
         if (!cancelled) {
@@ -360,7 +439,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activateBook]);
 
   const measureViewport = useCallback(() => {
     const viewport = pageViewportRef.current;
@@ -476,6 +555,7 @@ export default function App() {
       localStorage.setItem(LAST_BOOK_KEY, meta.id);
       currentBookRef.current = savedBook;
       currentFileRef.current = file;
+      setLibrary((current) => upsertLibraryBook(current, toLibraryBook(savedBook)));
 
       setBookMeta(meta);
       setContent(text);
@@ -488,11 +568,33 @@ export default function App() {
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(event.target.files ?? []);
+    if (files.length === 0) return;
 
-    await loadFile(file, encodingMode);
+    for (const file of files) {
+      await loadFile(file, encodingMode);
+    }
     event.target.value = '';
+  };
+
+  const handleBookChange = async (event: React.ChangeEvent<HTMLSelectElement>) => {
+    const nextBookId = event.target.value;
+    if (!nextBookId || nextBookId === bookMeta?.id) return;
+
+    setStatus('正在切换书籍...');
+
+    try {
+      const savedBook = await readFromStore<SavedBook>(nextBookId);
+      if (!savedBook) {
+        setStatus('没有找到这本书，请重新上传');
+        await refreshLibrary();
+        return;
+      }
+
+      activateBook(savedBook);
+    } catch {
+      setStatus('切换失败，请刷新后重试');
+    }
   };
 
   const handleEncodingChange = async (event: React.ChangeEvent<HTMLSelectElement>) => {
@@ -568,8 +670,23 @@ export default function App() {
             className="hidden"
             type="file"
             accept=".txt,text/plain"
+            multiple
             onChange={handleFileUpload}
           />
+
+          <select
+            aria-label="书籍"
+            value={bookMeta?.id ?? ''}
+            onChange={handleBookChange}
+            className="h-9 max-w-48 rounded-md border border-black/10 bg-transparent px-2 text-xs outline-none transition focus:border-black/30"
+          >
+            <option value="">书架</option>
+            {library.map((book) => (
+              <option key={book.id} value={book.id}>
+                {book.name}
+              </option>
+            ))}
+          </select>
 
           <select
             aria-label="文本编码"
