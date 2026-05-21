@@ -322,6 +322,7 @@ export default function App() {
   const [detectedEncoding, setDetectedEncoding] = useState<DisplayEncoding | null>(null);
   const [readingMode, setReadingMode] = useState<ReadingMode>('paged');
   const [pageIndex, setPageIndex] = useState(0);
+  const [pageJumpInput, setPageJumpInput] = useState('');
   const [scrollProgress, setScrollProgress] = useState(0);
   const [viewportSize, setViewportSize] = useState<ViewportSize>({width: 0, height: 0});
   const [status, setStatus] = useState('选择一个 TXT 文件开始阅读');
@@ -471,6 +472,10 @@ export default function App() {
 
     setPageIndex((current) => clamp(current, 0, pageCount - 1));
   }, [pageCount, readingMode]);
+
+  useEffect(() => {
+    setPageJumpInput(content && readingMode === 'paged' ? String(visiblePageIndex + 1) : '');
+  }, [content, readingMode, visiblePageIndex]);
 
   const saveProgress = useCallback((nextPageIndex: number, nextPageCount: number) => {
     const currentBook = currentBookRef.current;
@@ -631,6 +636,16 @@ export default function App() {
     setPageIndex((current) => clamp(current + delta, 0, pageCount - 1));
   }, [pageCount]);
 
+  const jumpToPage = () => {
+    const pageNumber = Number.parseInt(pageJumpInput, 10);
+    if (!Number.isFinite(pageNumber)) {
+      setPageJumpInput(String(visiblePageIndex + 1));
+      return;
+    }
+
+    goToPage(pageNumber - 1);
+  };
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!content || readingMode !== 'paged' || event.repeat || isFormTarget(event.target)) return;
@@ -779,7 +794,36 @@ export default function App() {
               </button>
 
               <div className="min-w-0 flex-1 text-center">
-                <div className="text-sm font-medium">{pageLabel}</div>
+                <div className="flex flex-wrap items-center justify-center gap-2 text-sm font-medium">
+                  <span>{pageLabel}</span>
+                  <span className="text-black/30">|</span>
+                  <label className="inline-flex items-center gap-1 text-xs text-black/55">
+                    跳到
+                    <input
+                      aria-label="跳转页码"
+                      type="number"
+                      min={1}
+                      max={pageCount}
+                      value={pageJumpInput}
+                      onChange={(event) => setPageJumpInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          jumpToPage();
+                          event.currentTarget.blur();
+                        }
+                      }}
+                      className="h-8 w-20 rounded-md border border-black/10 bg-transparent px-2 text-center text-xs text-[#191816] outline-none transition focus:border-black/30"
+                    />
+                    页
+                  </label>
+                  <button
+                    type="button"
+                    onClick={jumpToPage}
+                    className="h-8 rounded-md border border-black/10 bg-white px-3 text-xs transition hover:bg-black/5"
+                  >
+                    跳转
+                  </button>
+                </div>
                 <div className="mt-1 text-xs text-black/45">{status}</div>
               </div>
 
