@@ -32,8 +32,14 @@ interface ViewportSize {
   height: number;
 }
 
+interface PageRange {
+  start: number;
+  end: number;
+}
+
 type EncodingMode = 'auto' | 'utf-8' | 'gb18030' | 'gbk' | 'utf-16le' | 'utf-16be';
 type DisplayEncoding = 'UTF-8' | 'GB18030' | 'GBK' | 'UTF-16LE' | 'UTF-16BE';
+type ReadingMode = 'paged' | 'scroll';
 
 const DB_NAME = 'txt-reader-library';
 const DB_VERSION = 1;
@@ -185,54 +191,81 @@ const saveSavedProgress = (bookId: string, pageIndex: number, pageCount: number)
   localStorage.setItem(getProgressKey(bookId), JSON.stringify(savedProgress));
 };
 
-const paginateText = (text: string, viewport: ViewportSize, settings: ReaderSettings) => {
+const getNextLineBreak = (text: string, start: number) => {
+  let end = start;
+  while (end < text.length && text[end] !== '\n' && text[end] !== '\r') {
+    end += 1;
+  }
+
+  if (end >= text.length) {
+    return {lineEnd: end, nextStart: end};
+  }
+
+  if (text[end] === '\r' && text[end + 1] === '\n') {
+    return {lineEnd: end, nextStart: end + 2};
+  }
+
+  return {lineEnd: end, nextStart: end + 1};
+};
+
+const paginateTextRanges = (text: string, viewport: ViewportSize, settings: ReaderSettings) => {
   if (!text) return [];
-  if (viewport.width <= 0 || viewport.height <= 0) return [text.slice(0, 5000)];
+  if (viewport.width <= 0 || viewport.height <= 0) return [{start: 0, end: Math.min(text.length, 5000)}];
 
   const lineHeightPx = settings.fontSize * settings.lineHeight;
   const lineCount = Math.max(6, Math.floor(viewport.height / lineHeightPx));
   const charsPerLine = Math.max(12, Math.floor(viewport.width / (settings.fontSize * 1.02)));
   const linesPerPage = Math.max(4, lineCount - 1);
-  const pages: string[] = [];
-  let lines: string[] = [];
+  const pageRanges: PageRange[] = [];
+  let pageStart = 0;
+  let linesOnPage = 0;
 
-  const pushPage = () => {
-    pages.push(lines.join('\n'));
-    lines = [];
-  };
+  const pushVisualLine = (lineEnd: number) => {
+    linesOnPage += 1;
 
-  const pushLine = (line: string) => {
-    lines.push(line);
-    if (lines.length >= linesPerPage) {
-      pushPage();
+    if (linesOnPage >= linesPerPage) {
+      pageRanges.push({start: pageStart, end: lineEnd});
+      pageStart = lineEnd;
+      linesOnPage = 0;
     }
   };
 
-  for (const rawLine of text.replace(/\r\n?/g, '\n').split('\n')) {
-    if (!rawLine) {
-      pushLine('');
+  let cursor = 0;
+  while (cursor < text.length) {
+    const {lineEnd, nextStart} = getNextLineBreak(text, cursor);
+    const contentEnd = nextStart > lineEnd ? nextStart : lineEnd;
+
+    if (lineEnd === cursor) {
+      pushVisualLine(contentEnd);
+      cursor = nextStart;
       continue;
     }
 
-    for (let start = 0; start < rawLine.length; start += charsPerLine) {
-      pushLine(rawLine.slice(start, start + charsPerLine));
+    for (let start = cursor; start < lineEnd; start += charsPerLine) {
+      const isLastSegment = start + charsPerLine >= lineEnd;
+      pushVisualLine(isLastSegment ? contentEnd : Math.min(start + charsPerLine, lineEnd));
     }
+
+    cursor = nextStart;
   }
 
-  if (lines.length > 0 || pages.length === 0) {
-    pushPage();
+  if (pageStart < text.length || pageRanges.length === 0) {
+    pageRanges.push({start: pageStart, end: text.length});
   }
 
-  return pages;
+  return pageRanges;
 };
 
 export default function App() {
   const [content, setContent] = useState('');
   const [bookMeta, setBookMeta] = useState<BookMeta | null>(null);
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_SETTINGS);
+  const [paginationSettings, setPaginationSettings] = useState<ReaderSettings>(DEFAULT_SETTINGS);
   const [encodingMode, setEncodingMode] = useState<EncodingMode>('auto');
   const [detectedEncoding, setDetectedEncoding] = useState<DisplayEncoding | null>(null);
+  const [readingMode, setReadingMode] = useState<ReadingMode>('paged');
   const [pageIndex, setPageIndex] = useState(0);
+  const [scrollProgress, setScrollProgress] = useState(0);
   const [viewportSize, setViewportSize] = useState<ViewportSize>({width: 0, height: 0});
   const [status, setStatus] = useState('选择一个 TXT 文件开始阅读');
 
@@ -242,25 +275,33 @@ export default function App() {
   const currentBookRef = useRef<SavedBook | null>(null);
   const saveTimerRef = useRef<number | null>(null);
 
-  const pages = useMemo(() => paginateText(content, viewportSize, settings), [content, settings, viewportSize]);
-  const pageCount = Math.max(1, pages.length);
-  const currentPage = pages[clamp(pageIndex, 0, pageCount - 1)] ?? '';
+  const pageRanges = useMemo(
+    () => (readingMode === 'paged' ? paginateTextRanges(content, viewportSize, paginationSettings) : []),
+    [content, paginationSettings, readingMode, viewportSize],
+  );
+  const pageCount = readingMode === 'paged' ? Math.max(1, pageRanges.length) : 1;
+  const visiblePageIndex = clamp(pageIndex, 0, pageCount - 1);
+  const currentRange = pageRanges[visiblePageIndex] ?? {start: 0, end: 0};
+  const currentPage = content.slice(currentRange.start, currentRange.end);
 
   const progress = useMemo(() => {
     if (!content) return 0;
     if (pageCount <= 1) return 100;
     return (pageIndex / (pageCount - 1)) * 100;
   }, [content, pageCount, pageIndex]);
+  const displayedProgress = readingMode === 'scroll' ? scrollProgress : progress;
 
-  const visiblePageIndex = clamp(pageIndex, 0, pageCount - 1);
   const pageLabel = content ? `${visiblePageIndex + 1} / ${pageCount}` : '0 / 0';
+  const readingLabel = readingMode === 'paged' ? pageLabel : '滚动模式';
 
   useEffect(() => {
     const savedSettings = localStorage.getItem(SETTINGS_KEY);
     if (!savedSettings) return;
 
     try {
-      setSettings({...DEFAULT_SETTINGS, ...JSON.parse(savedSettings)});
+      const nextSettings = {...DEFAULT_SETTINGS, ...JSON.parse(savedSettings)};
+      setSettings(nextSettings);
+      setPaginationSettings(nextSettings);
     } catch {
       localStorage.removeItem(SETTINGS_KEY);
     }
@@ -268,6 +309,14 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }, [settings]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setPaginationSettings(settings);
+    }, 120);
+
+    return () => window.clearTimeout(timer);
   }, [settings]);
 
   useEffect(() => {
@@ -320,7 +369,7 @@ export default function App() {
   useEffect(() => {
     const frame = window.requestAnimationFrame(measureViewport);
     return () => window.cancelAnimationFrame(frame);
-  }, [measureViewport]);
+  }, [content, measureViewport, readingMode]);
 
   useEffect(() => {
     const viewport = pageViewportRef.current;
@@ -330,11 +379,13 @@ export default function App() {
     observer.observe(viewport);
 
     return () => observer.disconnect();
-  }, [measureViewport]);
+  }, [content, measureViewport, readingMode]);
 
   useEffect(() => {
+    if (readingMode !== 'paged') return;
+
     setPageIndex((current) => clamp(current, 0, pageCount - 1));
-  }, [pageCount]);
+  }, [pageCount, readingMode]);
 
   const saveProgress = useCallback((nextPageIndex: number, nextPageCount: number) => {
     const currentBook = currentBookRef.current;
@@ -354,10 +405,28 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!content || viewportSize.width <= 0 || viewportSize.height <= 0) return;
+    if (readingMode !== 'paged' || !content || viewportSize.width <= 0 || viewportSize.height <= 0) return;
 
     saveProgress(pageIndex, pageCount);
-  }, [content, pageCount, pageIndex, saveProgress, viewportSize]);
+  }, [content, pageCount, pageIndex, readingMode, saveProgress, viewportSize]);
+
+  useEffect(() => {
+    if (readingMode !== 'scroll' || !content) return undefined;
+
+    const updateScrollProgress = () => {
+      const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
+      setScrollProgress(maxScroll <= 0 ? 100 : clamp((window.scrollY / maxScroll) * 100, 0, 100));
+    };
+
+    updateScrollProgress();
+    window.addEventListener('scroll', updateScrollProgress, {passive: true});
+    window.addEventListener('resize', updateScrollProgress);
+
+    return () => {
+      window.removeEventListener('scroll', updateScrollProgress);
+      window.removeEventListener('resize', updateScrollProgress);
+    };
+  }, [content, readingMode]);
 
   useEffect(() => {
     return () => {
@@ -438,13 +507,21 @@ export default function App() {
     }));
   };
 
+  const handleModeChange = (nextMode: ReadingMode) => {
+    setReadingMode(nextMode);
+
+    if (nextMode === 'paged') {
+      window.scrollTo({top: 0});
+    }
+  };
+
   const goToPage = useCallback((nextPageIndex: number) => {
     setPageIndex(clamp(nextPageIndex, 0, pageCount - 1));
   }, [pageCount]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (!content) return;
+      if (!content || readingMode !== 'paged') return;
       if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
         event.preventDefault();
         goToPage(pageIndex - 1);
@@ -457,7 +534,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [content, goToPage, pageIndex]);
+  }, [content, goToPage, pageIndex, readingMode]);
 
   return (
     <div className="flex min-h-screen flex-col bg-[#fbfaf7] text-[#191816]">
@@ -470,7 +547,7 @@ export default function App() {
             </h1>
             <p className="truncate text-xs text-black/50">
               {bookMeta
-                ? `${formattedSize} · ${pageLabel} · ${progress.toFixed(1)}%${detectedEncoding ? ` · ${detectedEncoding}` : ''}`
+                ? `${formattedSize} · ${readingLabel} · ${displayedProgress.toFixed(1)}%${detectedEncoding ? ` · ${detectedEncoding}` : ''}`
                 : status}
             </p>
           </div>
@@ -495,6 +572,16 @@ export default function App() {
             <option value="gbk">GBK</option>
             <option value="utf-16le">UTF-16LE</option>
             <option value="utf-16be">UTF-16BE</option>
+          </select>
+
+          <select
+            aria-label="阅读模式"
+            value={readingMode}
+            onChange={(event) => handleModeChange(event.target.value as ReadingMode)}
+            className="h-9 rounded-md border border-black/10 bg-transparent px-2 text-xs outline-none transition focus:border-black/30"
+          >
+            <option value="paged">翻页</option>
+            <option value="scroll">滚动</option>
           </select>
 
           <div className="hidden items-center rounded-md border border-black/10 sm:flex">
@@ -528,13 +615,13 @@ export default function App() {
         </div>
         {content && (
           <div className="h-px bg-black/10">
-            <div className="h-px bg-[#191816]" style={{width: `${progress}%`}} />
+            <div className="h-px bg-[#191816]" style={{width: `${displayedProgress}%`}} />
           </div>
         )}
       </header>
 
       <main className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col px-4 py-4 sm:px-6 sm:py-6">
-        {content ? (
+        {content && readingMode === 'paged' ? (
           <section className="flex min-h-0 flex-1 flex-col">
             <div
               ref={pageViewportRef}
@@ -578,6 +665,19 @@ export default function App() {
                 <ChevronRight className="h-4 w-4" aria-hidden="true" />
               </button>
             </div>
+          </section>
+        ) : content ? (
+          <section className="mx-auto w-full max-w-3xl py-6">
+            <article
+              className="whitespace-pre-wrap break-words text-justify"
+              style={{
+                fontFamily: '"Noto Serif SC", "Songti SC", SimSun, Georgia, serif',
+                fontSize: `${settings.fontSize}px`,
+                lineHeight: settings.lineHeight,
+              }}
+            >
+              {content}
+            </article>
           </section>
         ) : (
           <section className="flex min-h-[70vh] items-center justify-center">
