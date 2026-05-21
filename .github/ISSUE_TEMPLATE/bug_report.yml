@@ -1,0 +1,37 @@
+name: Bug report
+description: Report something that is broken or confusing.
+title: '[Bug]: '
+labels: ['bug']
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the issue and what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the app
+        2. Upload ...
+        3. See ...
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser
+      placeholder: Chrome 125, Edge 125, Firefox 126, etc.
+  - type: textarea
+    id: file_details
+    attributes:
+      label: TXT file details
+      description: Share encoding, approximate size, and whether the file is safe to attach.
+      placeholder: UTF-8, GBK, GB18030, 2 MB, etc.
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context

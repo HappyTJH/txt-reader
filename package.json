@@ -2,12 +2,36 @@
   "name": "txt-reader",
   "private": true,
   "version": "0.0.0",
+  "description": "A lightweight local-first TXT reader for Chinese and English books.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HappyTJH/txt-reader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HappyTJH/txt-reader/issues"
+  },
+  "homepage": "https://happytjh.github.io/txt-reader/",
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "txt-reader",
+    "ebook-reader",
+    "react",
+    "vite",
+    "local-first",
+    "gbk",
+    "gb18030"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "npm run typecheck",
+    "test": "npm run lint && npm run build"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",
