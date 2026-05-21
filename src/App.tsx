@@ -166,6 +166,12 @@ const readTextFile = async (file: File, mode: EncodingMode) => {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
+const isFormTarget = (target: EventTarget | null) =>
+  target instanceof HTMLInputElement ||
+  target instanceof HTMLSelectElement ||
+  target instanceof HTMLTextAreaElement ||
+  target instanceof HTMLButtonElement;
+
 const getProgressKey = (bookId: string) => `${PROGRESS_PREFIX}:${bookId}`;
 
 const readSavedProgress = (bookId: string) => {
@@ -519,25 +525,30 @@ export default function App() {
     setPageIndex(clamp(nextPageIndex, 0, pageCount - 1));
   }, [pageCount]);
 
+  const goToRelativePage = useCallback((delta: number) => {
+    setPageIndex((current) => clamp(current + delta, 0, pageCount - 1));
+  }, [pageCount]);
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (!content || readingMode !== 'paged') return;
+      if (!content || readingMode !== 'paged' || event.repeat || isFormTarget(event.target)) return;
+
       if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
         event.preventDefault();
-        goToPage(pageIndex - 1);
+        goToRelativePage(-1);
       }
       if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {
         event.preventDefault();
-        goToPage(pageIndex + 1);
+        goToRelativePage(1);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [content, goToPage, pageIndex, readingMode]);
+  }, [content, goToRelativePage, readingMode]);
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#fbfaf7] text-[#191816]">
+    <div className={`flex flex-col bg-[#fbfaf7] text-[#191816] ${readingMode === 'paged' ? 'h-screen overflow-hidden' : 'min-h-screen'}`}>
       <header className="shrink-0 border-b border-black/10 bg-[#fbfaf7]/95 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3 sm:px-6">
           <BookOpen className="h-5 w-5 shrink-0" aria-hidden="true" />
@@ -620,7 +631,7 @@ export default function App() {
         )}
       </header>
 
-      <main className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col px-4 py-4 sm:px-6 sm:py-6">
+      <main className={`mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col px-4 py-4 sm:px-6 sm:py-6 ${readingMode === 'paged' ? 'overflow-hidden' : ''}`}>
         {content && readingMode === 'paged' ? (
           <section className="flex min-h-0 flex-1 flex-col">
             <div
@@ -628,7 +639,7 @@ export default function App() {
               className="relative min-h-0 flex-1 overflow-hidden rounded-md border border-black/10 bg-white px-5 py-8 shadow-sm sm:px-10 md:px-14"
             >
               <article
-                className="h-full whitespace-pre-wrap break-words text-justify"
+                className="h-full overflow-hidden whitespace-pre-wrap break-words text-justify"
                 style={{
                   fontFamily: '"Noto Serif SC", "Songti SC", SimSun, Georgia, serif',
                   fontSize: `${settings.fontSize}px`,
