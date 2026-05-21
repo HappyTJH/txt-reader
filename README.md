@@ -1,20 +1,27 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# TXT Reader
 
-# Run and deploy your AI Studio app
+A lightweight browser-based TXT reader for Chinese and English text files.
 
-This contains everything you need to run your app locally.
+## Features
 
-View your app in AI Studio: https://ai.studio/apps/e692e527-e0a6-4d53-9471-5cc4456365b7
+- Upload local `.txt` files without sending content to a server
+- Switch between UTF-8 and GBK decoding
+- Adjust reading font size
+- Automatically restore the last opened book and reading progress
+- Deploy as a static Vite app on GitHub Pages
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
+Prerequisite: Node.js.
 
+```bash
+npm install
+npm run dev
+```
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## Build
+
+```bash
+npm run lint
+npm run build
+```
