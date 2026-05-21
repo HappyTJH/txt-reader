@@ -21,6 +21,17 @@ interface SavedBook extends BookMeta {
   updatedAt: number;
 }
 
+interface SavedProgress {
+  pageIndex: number;
+  progress: number;
+  updatedAt: number;
+}
+
+interface ViewportSize {
+  width: number;
+  height: number;
+}
+
 type EncodingMode = 'auto' | 'utf-8' | 'gb18030' | 'gbk' | 'utf-16le' | 'utf-16be';
 type DisplayEncoding = 'UTF-8' | 'GB18030' | 'GBK' | 'UTF-16LE' | 'UTF-16BE';
 
@@ -29,7 +40,7 @@ const DB_VERSION = 1;
 const BOOK_STORE = 'books';
 const LAST_BOOK_KEY = 'txt-reader-last-book-id';
 const SETTINGS_KEY = 'txt-reader-settings-v3';
-const PAGE_GAP = 48;
+const PROGRESS_PREFIX = 'txt-reader-progress-v1';
 
 const DEFAULT_SETTINGS: ReaderSettings = {
   fontSize: 19,
@@ -149,6 +160,72 @@ const readTextFile = async (file: File, mode: EncodingMode) => {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
+const getProgressKey = (bookId: string) => `${PROGRESS_PREFIX}:${bookId}`;
+
+const readSavedProgress = (bookId: string) => {
+  const rawProgress = localStorage.getItem(getProgressKey(bookId));
+  if (!rawProgress) return null;
+
+  try {
+    return JSON.parse(rawProgress) as SavedProgress;
+  } catch {
+    localStorage.removeItem(getProgressKey(bookId));
+    return null;
+  }
+};
+
+const saveSavedProgress = (bookId: string, pageIndex: number, pageCount: number) => {
+  const progress = pageCount <= 1 ? 100 : (pageIndex / (pageCount - 1)) * 100;
+  const savedProgress: SavedProgress = {
+    pageIndex,
+    progress,
+    updatedAt: Date.now(),
+  };
+
+  localStorage.setItem(getProgressKey(bookId), JSON.stringify(savedProgress));
+};
+
+const paginateText = (text: string, viewport: ViewportSize, settings: ReaderSettings) => {
+  if (!text) return [];
+  if (viewport.width <= 0 || viewport.height <= 0) return [text.slice(0, 5000)];
+
+  const lineHeightPx = settings.fontSize * settings.lineHeight;
+  const lineCount = Math.max(6, Math.floor(viewport.height / lineHeightPx));
+  const charsPerLine = Math.max(12, Math.floor(viewport.width / (settings.fontSize * 1.02)));
+  const linesPerPage = Math.max(4, lineCount - 1);
+  const pages: string[] = [];
+  let lines: string[] = [];
+
+  const pushPage = () => {
+    pages.push(lines.join('\n'));
+    lines = [];
+  };
+
+  const pushLine = (line: string) => {
+    lines.push(line);
+    if (lines.length >= linesPerPage) {
+      pushPage();
+    }
+  };
+
+  for (const rawLine of text.replace(/\r\n?/g, '\n').split('\n')) {
+    if (!rawLine) {
+      pushLine('');
+      continue;
+    }
+
+    for (let start = 0; start < rawLine.length; start += charsPerLine) {
+      pushLine(rawLine.slice(start, start + charsPerLine));
+    }
+  }
+
+  if (lines.length > 0 || pages.length === 0) {
+    pushPage();
+  }
+
+  return pages;
+};
+
 export default function App() {
   const [content, setContent] = useState('');
   const [bookMeta, setBookMeta] = useState<BookMeta | null>(null);
@@ -156,16 +233,18 @@ export default function App() {
   const [encodingMode, setEncodingMode] = useState<EncodingMode>('auto');
   const [detectedEncoding, setDetectedEncoding] = useState<DisplayEncoding | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
-  const [pageCount, setPageCount] = useState(1);
-  const [pageWidth, setPageWidth] = useState(0);
+  const [viewportSize, setViewportSize] = useState<ViewportSize>({width: 0, height: 0});
   const [status, setStatus] = useState('选择一个 TXT 文件开始阅读');
 
   const pageViewportRef = useRef<HTMLDivElement>(null);
-  const pageContentRef = useRef<HTMLElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const currentFileRef = useRef<File | null>(null);
   const currentBookRef = useRef<SavedBook | null>(null);
   const saveTimerRef = useRef<number | null>(null);
+
+  const pages = useMemo(() => paginateText(content, viewportSize, settings), [content, settings, viewportSize]);
+  const pageCount = Math.max(1, pages.length);
+  const currentPage = pages[clamp(pageIndex, 0, pageCount - 1)] ?? '';
 
   const progress = useMemo(() => {
     if (!content) return 0;
@@ -173,7 +252,8 @@ export default function App() {
     return (pageIndex / (pageCount - 1)) * 100;
   }, [content, pageCount, pageIndex]);
 
-  const pageLabel = content ? `${pageIndex + 1} / ${pageCount}` : '0 / 0';
+  const visiblePageIndex = clamp(pageIndex, 0, pageCount - 1);
+  const pageLabel = content ? `${visiblePageIndex + 1} / ${pageCount}` : '0 / 0';
 
   useEffect(() => {
     const savedSettings = localStorage.getItem(SETTINGS_KEY);
@@ -208,9 +288,10 @@ export default function App() {
           size: savedBook.size,
           lastModified: savedBook.lastModified,
         });
+        const savedProgress = readSavedProgress(savedBook.id);
         setContent(savedBook.content);
         setDetectedEncoding(savedBook.detectedEncoding ?? null);
-        setPageIndex(savedBook.pageIndex ?? 0);
+        setPageIndex(savedProgress?.pageIndex ?? savedBook.pageIndex ?? 0);
         setStatus(`已恢复：${savedBook.name}`);
       } catch {
         if (!cancelled) {
@@ -226,66 +307,57 @@ export default function App() {
     };
   }, []);
 
-  const measurePages = useCallback(() => {
+  const measureViewport = useCallback(() => {
     const viewport = pageViewportRef.current;
-    const article = pageContentRef.current;
-    if (!viewport || !article || !content) {
-      setPageCount(1);
-      setPageWidth(0);
-      return;
-    }
+    if (!viewport) return;
 
-    const nextPageWidth = article.clientWidth || viewport.clientWidth;
-    if (nextPageWidth <= 0) return;
-
-    const nextPageCount = Math.max(1, Math.ceil((article.scrollWidth + 1) / (nextPageWidth + PAGE_GAP)));
-    setPageWidth(nextPageWidth);
-    setPageCount(nextPageCount);
-    setPageIndex((current) => clamp(current, 0, nextPageCount - 1));
-  }, [content]);
+    setViewportSize({
+      width: viewport.clientWidth,
+      height: viewport.clientHeight,
+    });
+  }, []);
 
   useEffect(() => {
-    const frame = window.requestAnimationFrame(measurePages);
+    const frame = window.requestAnimationFrame(measureViewport);
     return () => window.cancelAnimationFrame(frame);
-  }, [measurePages, settings.fontSize, settings.lineHeight]);
+  }, [measureViewport]);
 
   useEffect(() => {
     const viewport = pageViewportRef.current;
     if (!viewport) return undefined;
 
-    const observer = new ResizeObserver(() => measurePages());
+    const observer = new ResizeObserver(() => measureViewport());
     observer.observe(viewport);
 
     return () => observer.disconnect();
-  }, [measurePages]);
+  }, [measureViewport]);
+
+  useEffect(() => {
+    setPageIndex((current) => clamp(current, 0, pageCount - 1));
+  }, [pageCount]);
 
   const saveProgress = useCallback((nextPageIndex: number, nextPageCount: number) => {
     const currentBook = currentBookRef.current;
     if (!currentBook) return;
-
-    const nextBook = {
-      ...currentBook,
-      pageIndex: nextPageIndex,
-      progress: nextPageCount <= 1 ? 100 : (nextPageIndex / (nextPageCount - 1)) * 100,
-      updatedAt: Date.now(),
-    };
-
-    currentBookRef.current = nextBook;
 
     if (saveTimerRef.current) {
       window.clearTimeout(saveTimerRef.current);
     }
 
     saveTimerRef.current = window.setTimeout(() => {
-      writeToStore(nextBook).catch(() => {
+      try {
+        saveSavedProgress(currentBook.id, nextPageIndex, nextPageCount);
+      } catch {
         setStatus('进度保存失败，请稍后重试');
-      });
+      }
     }, 250);
   }, []);
 
   useEffect(() => {
+    if (!content || viewportSize.width <= 0 || viewportSize.height <= 0) return;
+
     saveProgress(pageIndex, pageCount);
-  }, [pageCount, pageIndex, saveProgress]);
+  }, [content, pageCount, pageIndex, saveProgress, viewportSize]);
 
   useEffect(() => {
     return () => {
@@ -314,12 +386,13 @@ export default function App() {
       };
 
       const previousBook = await readFromStore<SavedBook>(meta.id);
-      const nextPageIndex = keepPage ? previousBook?.pageIndex ?? 0 : 0;
+      const previousProgress = readSavedProgress(meta.id);
+      const nextPageIndex = keepPage ? previousProgress?.pageIndex ?? previousBook?.pageIndex ?? 0 : 0;
       const savedBook: SavedBook = {
         ...meta,
         content: text,
         pageIndex: nextPageIndex,
-        progress: previousBook?.progress ?? 0,
+        progress: previousProgress?.progress ?? previousBook?.progress ?? 0,
         detectedEncoding: nextDetectedEncoding,
         updatedAt: Date.now(),
       };
@@ -468,19 +541,14 @@ export default function App() {
               className="relative min-h-0 flex-1 overflow-hidden rounded-md border border-black/10 bg-white px-5 py-8 shadow-sm sm:px-10 md:px-14"
             >
               <article
-                ref={pageContentRef}
-                className="h-full whitespace-pre-wrap break-words text-justify transition-transform duration-200"
+                className="h-full whitespace-pre-wrap break-words text-justify"
                 style={{
-                  columnGap: `${PAGE_GAP}px`,
-                  columnWidth: pageWidth ? `${pageWidth}px` : 'auto',
                   fontFamily: '"Noto Serif SC", "Songti SC", SimSun, Georgia, serif',
                   fontSize: `${settings.fontSize}px`,
-                  height: '100%',
                   lineHeight: settings.lineHeight,
-                  transform: pageWidth ? `translateX(-${pageIndex * (pageWidth + PAGE_GAP)}px)` : undefined,
                 }}
               >
-                {content}
+                {currentPage}
               </article>
             </div>
 
